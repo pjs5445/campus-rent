@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ko" xmlns:th="http://www.thymeleaf.org">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="CampusRent — 교내 시설·장비 탐색, 목적별 추천과 대여 신청">
+  <meta name="app-base" content="/" th:content="@{/}">
+  <title>CampusRent | 교내 시설·장비 대여</title>
+  <link rel="stylesheet" href="/css/app.css" th:href="@{/css/app.css}">
+  <script type="module" src="/js/app.js" th:src="@{/js/app.js}"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">본문으로 바로가기</a>
+  <header class="site-header"><div class="header-inner" id="header"></div></header>
+  <main id="main" tabindex="-1"></main>
+  <footer class="site-footer"><div class="container">
+    <a class="brand footer-brand" href="/" data-route>Campus<span>Rent</span></a>
+    <p>New-Era · 교내 시설·장비 대여 및 관리 시스템</p>
+    <p class="copyright">© 2026 CampusRent (New-Era). All rights reserved.</p>
+  </div></footer>
+  <dialog id="modal" aria-labelledby="modal-title"></dialog>
+  <div id="toast" role="status" aria-live="polite" class="toast" hidden></div>
+  <noscript><p class="notice">화면 미리보기를 사용하려면 브라우저의 JavaScript를 활성화해주세요.</p></noscript>
+</body>
+</html>
