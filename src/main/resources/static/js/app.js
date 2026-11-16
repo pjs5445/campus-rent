@@ -3,10 +3,11 @@ import { resources, purposes, initialConditions, analyzeInput, recommendations, 
 import { readRentalStateIfAvailable, persistRecords, reservationBlocks, stageLabel, ended,
   scheduleSummary, addHours, processingHistory, SIGNAL_KEY, CHANNEL_NAME } from './rental-records.js';
 import { equipmentRestrictions, returnTotals } from './equipment-inspection.js';
-import { authenticate } from './auth-service.js';
+import { authenticate, currentUser, logout } from './auth-service.js';
+import { api } from './api-client.js';
+import { setServerCatalog } from './rental-data.js';
 
-// The view is plain JavaScript. Replace the demo services with server calls when
-// Spring MVC, server sessions and Oracle are introduced. Never trust this UI for authorization.
+// Oracle persistence and authorization are handled by the server APIs.
 const $ = (s, root = document) => root.querySelector(s);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const base = $('meta[name="app-base"]').content.replace(/\/$/, '');
@@ -19,10 +20,11 @@ const drafts = {equipment:{...initialConditions}, facility:{...initialConditions
 const state = { user:null, records:[], equipmentStates:{}, selected:{}, conditions:{equipment:null,facility:null},
   activity:'', purpose:'', peopleSource:{activity:'',manuallyEdited:false}, category:'전체', query:'', adminFilter:'all', busy:false };
 const sessionKey = 'campusrent.ui.selection.v1';
+let selectionSave = Promise.resolve();
 try {
   const saved = JSON.parse(sessionStorage.getItem(sessionKey) || '{}');
   for (const [id, condition] of Object.entries(saved)) {
-    if (resources.some(r => r.id === id) && condition && typeof condition.start === 'string' && typeof condition.end === 'string'
+    if (typeof id === 'string' && condition && typeof condition.start === 'string' && typeof condition.end === 'string'
       && Number.isInteger(condition.people) && typeof condition.use === 'string') state.selected[id] = condition;
   }
 } catch { /* A corrupt or unavailable session starts with an empty list. */ }
@@ -40,6 +42,11 @@ function toast(message, error = false) {
   el.classList.toggle('error', error); toastTimer = setTimeout(() => { el.hidden = true; }, 5500);
 }
 function saveSelection() {
+  if(state.user){
+    const selected=JSON.parse(JSON.stringify(state.selected)),owner=state.user.id;
+    selectionSave=selectionSave.then(()=>state.user?.id===owner?api('/selection',{method:'POST',body:{selected}}):null)
+      .catch(error=>toast('선택 목록 저장 실패: '+error.message,true));
+  }
   try { sessionStorage.setItem(sessionKey, JSON.stringify(state.selected)); }
   catch { toast('브라우저 저장소를 사용할 수 없어 선택 목록은 현재 화면에서만 유지됩니다.', true); }
 }
@@ -190,14 +197,14 @@ function recordItem(record,item,index,admin) {
 }
 function recordsView(admin=false, history=false) {
   const title=admin?'신청 관리':history?'과거 신청 내역':'내 신청 현황';
-  if (!state.user || (admin && state.user.role!=='admin') || (!admin && state.user.role!=='student')) return `<div class="container records-page">${heading(title,'로그인한 계정의 권한에 맞는 신청 내역을 확인합니다.')}${empty(admin?'관리자 로그인이 필요합니다.':'학생 로그인이 필요합니다.','준비된 시연 계정으로 화면 흐름을 확인할 수 있습니다.',button('login','로그인','','primary'))}</div>`;
+  if (!state.user || (admin && state.user.role!=='admin') || (!admin && state.user.role!=='student')) return `<div class="container records-page">${heading(title,'로그인한 계정의 권한에 맞는 신청 내역을 확인합니다.')}${empty(admin?'관리자 로그인이 필요합니다.':'학생 로그인이 필요합니다.','학생 또는 관리자 계정으로 로그인해주세요.',button('login','로그인','','primary'))}</div>`;
   const records=state.records.filter(r=>admin||r.userId===state.user.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
   const all=records.flatMap(r=>r.items);
   const filter=item=>admin?(state.adminFilter==='all'||item.stage===state.adminFilter):ended(item)===history;
   return `<div class="container records-page">${notice}${heading(title,admin?'신청 조건을 확인하고 항목별 승인·이용·반납을 처리합니다.':'신청 상태와 처리 사유를 확인하세요.')}
     ${admin?`<div class="stat-grid">${[['승인 대기','pending'],['이용·대여 중','collected'],['반납 확인 대기','return_requested'],['반납 보류','return_held']].map(([t,s])=>`<div class="stat"><strong>${all.filter(i=>i.stage===s).length}</strong><span>${t}</span></div>`).join('')}</div><div class="tabs">${[['전체','all'],['승인 대기','pending'],['승인 완료','approved'],['이용·대여 중','collected'],['반납 확인','return_requested'],['보류','return_held'],['완료','returned']].map(([t,s])=>`<button class="chip" data-action="admin-filter" data-value="${s}" aria-pressed="${state.adminFilter===s}">${t}</button>`).join('')}</div>`:
       `<div class="tabs">${link('/records','진행 중 신청','btn '+(!history?'primary':''))}${link('/history','과거 내역','btn '+(history?'primary':''))}</div>`}
-    ${records.some(r=>r.items.some(filter))?records.filter(r=>r.items.some(filter)).map(r=>`<article class="panel record"><div class="row between record-heading"><h3>신청 ${esc(r.number)}</h3><span class="small muted">${esc(new Date(r.createdAt).toLocaleString('ko-KR'))}${admin?' · '+esc(r.userId):''}</span></div>${r.items.map((i,index)=>filter(i)?recordItem(r,i,index,admin):'').join('')}</article>`).join(''):empty('표시할 신청 내역이 없습니다.',admin?'학생 시연 계정으로 신청하면 이곳에서 처리할 수 있습니다.':'필요한 자원을 찾아 이용 신청을 시작해보세요.',link('/equipment','장비 찾아보기','btn'))}</div>`;
+    ${records.some(r=>r.items.some(filter))?records.filter(r=>r.items.some(filter)).map(r=>`<article class="panel record"><div class="row between record-heading"><h3>신청 ${esc(r.number)}</h3><span class="small muted">${esc(new Date(r.createdAt).toLocaleString('ko-KR'))}${admin?' · '+esc(r.userId):''}</span></div>${r.items.map((i,index)=>filter(i)?recordItem(r,i,index,admin):'').join('')}</article>`).join(''):empty('표시할 신청 내역이 없습니다.',admin?'학생이 신청하면 이곳에서 처리할 수 있습니다.':'필요한 자원을 찾아 이용 신청을 시작해보세요.',link('/equipment','장비 찾아보기','btn'))}</div>`;
 }
 function render() {
   header(); const p=path();
@@ -246,11 +253,11 @@ function showSlots(id) {
 }
 function showAuth(signup=false,continuation=null) {
   authContinuation=continuation || authContinuation;
-  openModal(signup?'회원가입':'로그인',`<p class="muted">${signup?'학생 시연 계정을 만듭니다. 새 계정은 새로고침 시 초기화됩니다.':'로그인 후 신청 현황을 확인하고 대여를 신청하세요.'}</p>
+  openModal(signup?'회원가입':'로그인',`<p class="muted">${signup?'학생 계정을 만들고 로그인합니다.':'로그인 후 신청 현황을 확인하고 대여를 신청하세요.'}</p>
     <form data-form="auth" data-signup="${signup}"><div class="stack">${signup?'<label class="field">이름<input name="name" autocomplete="name" required></label>':''}<label class="field">이메일<input name="email" type="email" autocomplete="username" required></label><label class="field">비밀번호<input name="password" type="password" autocomplete="${signup?'new-password':'current-password'}" required></label></div>
       <p class="form-error" role="alert" hidden></p><button class="btn primary full" style="margin-top:20px">${signup?'가입하고 로그인':'로그인'}</button></form>
     <div class="row between" style="margin-top:16px"><span class="small muted">${signup?'이미 계정이 있나요?':'처음 이용하시나요?'}</span>${button(signup?'login':'signup',signup?'로그인':'회원가입','','small')}</div>
-    <details class="auth-demo"><summary>시연 계정 안내</summary><p>학생: demo@campusrent.example / Campus123!</p><p>관리자: admin@campusrent.example / CampusAdmin123!</p><p>실제 학교 계정과 연결되지 않습니다. 로그인은 새로고침 시 초기화됩니다.</p></details>`);
+`);
 }
 function showRequest(id) {
   const r=resource(id),c=state.selected[id];if(!r||!c)return;
@@ -270,7 +277,8 @@ async function commitChange(change) {
   const result=await persistRecords(change,()=>Boolean(state.user),()=>state.user);
   if(result.records)state.records=result.records;
   if(result.equipmentStates)state.equipmentStates=result.equipmentStates;
-  if(result.status!=='saved')throw new Error(result.message || (result.status==='conflict'?'다른 창에서 상태가 변경되었습니다. 창을 닫고 최신 상태에서 다시 확인해주세요.':'저장하지 못했습니다. 브라우저 저장소 사용 여부를 확인해주세요.'));
+  if(result.status==='saved'){ const reservations=await api('/availability');setServerCatalog(resources,reservations); }
+  if(result.status!=='saved')throw new Error(result.message || (result.status==='conflict'?'다른 창에서 상태가 변경되었습니다. 창을 닫고 최신 상태에서 다시 확인해주세요.':'저장하지 못했습니다. 서버 연결 상태를 확인해주세요.'));
   return result;
 }
 function showTransition(number,id,to) {
@@ -316,7 +324,7 @@ document.addEventListener('click', async event => {
     else if(action==='select-slot'){const c=modalContext.slots[Number(el.dataset.index)],r=resource(modalContext.id);const errors=check(r,c);if(errors.length)throw new Error(errors.join(' '));state.selected[r.id]={...c};saveSelection();modal.close();render();toast('새 일정을 선택 목록에 담았습니다.');}
     else if(action==='login')showAuth();
     else if(action==='signup')showAuth(true);
-    else if(action==='logout'){state.user=null;authContinuation=null;render();toast('로그아웃했습니다.');}
+    else if(action==='logout'){await logout();state.user=null;state.records=[];state.selected={};sessionStorage.removeItem(sessionKey);authContinuation=null;if(modal.open)modal.close();await refresh();render();toast('로그아웃했습니다.');}
     else if(action==='request')showRequest(id);
     else if(action==='admin-filter'){state.adminFilter=value;render();}
     else if(action==='transition')showTransition(number,id,to);
@@ -366,7 +374,7 @@ document.addEventListener('submit',async event=>{
       state.busy=true;if(submitter)submitter.disabled=true;
       if(mode==='auth'){
         const user=await authenticate({name:String(f.get('name')||''),email:String(f.get('email')),password:String(f.get('password'))},form.dataset.signup==='true');
-        state.user=user;const pending=authContinuation;authContinuation=null;modal.close();render();toast(`${user.name}님, 로그인했습니다.`);
+        state.user=user;const savedSelection=await api('/selection');state.selected={...savedSelection.selected,...state.selected};await api('/selection',{method:'POST',body:{selected:state.selected}});await refresh();const pending=authContinuation;authContinuation=null;modal.close();render();toast(`${user.name}님, 로그인했습니다.`);
         if(pending)showRequest(pending);
       } else if(mode==='request'){
         const id=form.dataset.id,r=resource(id),c=state.selected[id];if(!c||!state.user)throw new Error('선택 항목과 로그인 상태를 다시 확인해주세요.');
@@ -395,12 +403,19 @@ modal.addEventListener('close',()=>{
   if(lastFocus?.isConnected)lastFocus.focus();else $('#main').focus({preventScroll:true});
 });
 window.addEventListener('popstate',()=>{if(modal.open)modal.close();syncRoute();render();});
+let refreshVersion=0;
 async function refresh() {
-  const snapshot=await readRentalStateIfAvailable();
-  if(snapshot){state.records=snapshot.records;state.equipmentStates=snapshot.equipmentStates;}
-  if(['/admin','/records','/history'].includes(path())&&!state.busy&&!modal.open)render();
+  const version=++refreshVersion;
+  await selectionSave;
+  const user=await currentUser();
+  const [snapshot,catalog,reservations,savedSelection]=await Promise.all([readRentalStateIfAvailable(),api('/resources'),api('/availability'),user?api('/selection'):Promise.resolve(null)]);
+  if(version!==refreshVersion)return;
+  state.user=user;if(savedSelection)state.selected=savedSelection.selected;state.records=snapshot?.records||[];state.equipmentStates=snapshot?.equipmentStates||{};
+  setServerCatalog(catalog,reservations);
+  for(const id of Object.keys(state.selected))if(!resources.some(r=>r.id===id))delete state.selected[id];
+  if(!state.busy&&!modal.open)render();
 }
-window.addEventListener('storage',event=>{if(event.key===SIGNAL_KEY)refresh();});
-window.addEventListener('focus',()=>refresh());
-try {const channel=new BroadcastChannel(CHANNEL_NAME);channel.onmessage=()=>refresh();}catch{/* Focus and storage events are fallback transports. */}
-await refresh();syncRoute();render();
+async function refreshSafely(){try{await refresh();}catch(error){toast(error.message||'서버 연결을 확인해주세요.',true);}}
+window.addEventListener('focus',refreshSafely);
+try {const channel=new BroadcastChannel(CHANNEL_NAME);channel.onmessage=refreshSafely;}catch{}
+try{await refresh();syncRoute();render();}catch(error){header();$('#main').innerHTML='<div class="container records-page"><h1>데이터를 불러오지 못했습니다</h1><p>'+esc(error.message)+'</p><button class="btn primary" onclick="location.reload()">다시 시도</button></div>';}

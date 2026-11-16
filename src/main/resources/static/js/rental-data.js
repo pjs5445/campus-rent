@@ -178,7 +178,7 @@ const facility = (id, name, category, capacity, allowedUses, contents, location)
         rentable: true,
         status: "정상"
     });
-export const resources = [
+export let resources = [
     equipment("cam01", "이동형 디지털카메라 고정 세트 A", "카메라", "DEMO-CAM100", [
         "영상 4K / 30fps",
         "기본 렌즈 24–70mm"
@@ -258,7 +258,7 @@ export const resources = [
         "방음 설비"
     ], "가상 캠퍼스 · C동 102호")
 ];
-export const bookings = [
+export let bookings = [
     {
         resourceId: "mic01",
         start: `${demoDay}T13:00`,
@@ -322,9 +322,12 @@ export function availability(resource, condition, reservations = [], restriction
         if (condition.people > (resource.capacity ?? 0)) errors.push(`수용 ${resource.capacity}명보다 이용 인원 ${condition.people}명이 많습니다.`);
         if (!condition.use) errors.push("시설의 실제 이용 목적을 선택해주세요.");
         else if (!resource.allowedUses?.includes(condition.use)) errors.push(`허용 용도와 맞지 않습니다. 허용: ${resource.allowedUses?.join(" · ")}`);
+        const day = new Date(condition.start).getDay() || 7;
+        const hours = resource.weeklyHours ? resource.weeklyHours[day] : resource.operatingHours;
+        if (!hours) return [...errors, '시설 운영일이 아닙니다.'];
         const startTime = condition.start.slice(11, 16);
         const endTime = condition.end.slice(11, 16);
-        if (condition.start.slice(0, 10) !== condition.end.slice(0, 10) || startTime < resource.operatingHours[0] || endTime > resource.operatingHours[1]) errors.push(`운영 시간 ${resource.operatingHours?.join("–")} 안에서 같은 날짜로 선택해주세요.`);
+        if (condition.start.slice(0, 10) !== condition.end.slice(0, 10) || startTime < hours[0] || endTime > hours[1]) errors.push(`운영 시간 ${resource.operatingHours?.join("–")} 안에서 같은 날짜로 선택해주세요.`);
     }
     for (const booking of bookings)if (booking.approved && booking.resourceId === resource.id && new Date(condition.start) < new Date(booking.end) && new Date(condition.end) > new Date(booking.start)) errors.push(booking.reason);
     if (reservations.some((booking)=>booking.resourceId === resource.id && new Date(condition.start) < new Date(booking.end) && new Date(condition.end) > new Date(booking.start))) errors.push("관리자가 승인한 신청과 이용 기간이 겹칩니다.");
@@ -537,4 +540,9 @@ export function alternateSlots(resource, condition, from, until, reservations = 
         if (result.length === 8) break;
     }
     return result;
+}
+
+export function setServerCatalog(catalog,reservations){
+ if(!Array.isArray(catalog)||!Array.isArray(reservations)) throw new Error('서버 자원 응답을 확인할 수 없습니다.');
+ resources=catalog;bookings=reservations;
 }

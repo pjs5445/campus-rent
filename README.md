@@ -39,13 +39,17 @@ CampusRent는 학생이 필요한 교내 시설·장비를 **직접 검색**하�
 
 ## 4. 개발 기술 및 환경
 
+2026-11-16: Java 8 / Spring Boot 2.7.18 / Oracle JDBC 12.2.0.1 연결 기반을 추가했습니다.
+로컬 비밀정보 관리, 실행·검증 방법과 ERD 확인 제한은 [Oracle 연결 안내](docs/development/oracle-setup.md)를 참고하세요.
+회원 인증·선택 목록·신청·승인·검수·시설 이용 이력을 Oracle에 저장하도록 연결했습니다. 초기 자원은 가상 자료입니다.
+
 | 구분                  | 계획 및 현황                                      |
 | --------------------- | ------------------------------------------------- |
-| 최종 Frontend         | HTML, CSS, JavaScript 화면 코드 작성 · Thymeleaf 엔진 연동 예정 |
+| 최종 Frontend         | HTML, CSS, JavaScript · Thymeleaf 렌더링 연결 |
 | 화면 시연             | Figma Make, React, TypeScript, Tailwind CSS, Vite |
-| Backend               | Java, Spring Boot (계획)                          |
-| Database              | Oracle Database (계획)                            |
-| 데이터 접근           | MyBatis 또는 JDBC (협의 필요)                     |
+| Backend               | Java 8, Spring Boot 2.7.18 (연결 기반 추가)         |
+| Database              | Oracle Database 11g XE                            |
+| 데이터 접근           | Spring JDBC / HikariCP (업무 API 연결)         |
 | 목적별 추천           | 등록된 키워드·용도·인원 조건에 따른 규칙 기반     |
 | 버전 관리             | Git / GitHub                                      |
 | 개발·바이브 코딩 도구 | 팀 협의 후 확정                                   |
@@ -79,6 +83,8 @@ campus-rent/
 ├── New-Era_PROJECT.md
 ├── .gitignore
 ├── preview.cmd        # Java 기반 로컬 화면 미리보기
+├── pom.xml            # Spring Boot / JDBC 빌드 및 연결 테스트
+├── config/            # Git 제외 로컬 DB 설정 및 공유용 예제
 ├── package.json       # 선택 사항: Node.js 검증 명령 (설치할 의존성 없음)
 ├── docs/
 │   ├── usecase/
@@ -115,29 +121,27 @@ campus-rent/
 
 **주의:** 화면 시연 구현과 최종 서버·DB 연동 완료는 구분합니다. 이 README의 기능 목록은 프로젝트 목표를 포함하며 전체 기능 구현 완료를 의미하지 않습니다.
 
-## 10. 화면 미리보기
+## 10. 실행 및 DB 기능 확인
 
-JDK 8 이상에서 `java`와 `javac`를 PATH에 등록한 뒤, 저장소 루트에서 실행합니다. 현재 로컬 JDK 8로 컴파일·서버 실행을 확인했습니다.
+JDK 8 이상에서 저장소 루트를 기준으로 실행합니다. 로컬 DB 설정은
+[Oracle 연결 안내](docs/development/oracle-setup.md)를 참고하세요.
 
 ```powershell
-.\preview.cmd
+.\mvnw.cmd spring-boot:run
 ```
 
-브라우저에서 [http://127.0.0.1:8080](http://127.0.0.1:8080)을 엽니다. 종료는 `Ctrl+C`입니다. 8080 포트가 사용 중이면 `.\preview.cmd 8081`로 실행합니다. 화면 미리보기에는 Node.js와 npm 설치가 필요하지 않습니다.
-
-홈 → 장비·시설 검색 또는 목적별 추천 → 조건 적용 → 선택 목록 → 로그인 → 항목별 최종 신청 순서로 확인할 수 있습니다. 학생 신청 후 로그아웃하고 관리자 계정으로 로그인하면 신청 관리 화면에서 처리합니다.
-
-| 시연 역할 | 이메일 | 비밀번호 |
-| --- | --- | --- |
-| 학생 | `demo@campusrent.example` | `Campus123!` |
-| 관리자 | `admin@campusrent.example` | `CampusAdmin123!` |
-
-위 계정은 공개된 로컬 시연 전용입니다. 로그인과 신규 가입 계정은 새로고침 시 초기화되며, 선택 목록은 탭의 sessionStorage, 가상 신청·검수 기록은 해당 브라우저의 IndexedDB에 보존됩니다. 실제 계정 인증이나 예약 접수 기능이 아닙니다.
-
-Node.js 22 이상이 있으면 별도 패키지 설치 없이 로직 검사를 실행할 수 있습니다.
+[http://127.0.0.1:8080](http://127.0.0.1:8080)에서 학생 회원가입 후 신청할 수 있습니다.
+관리자 로그인 정보는 Git에서 제외된 `config/admin-login.txt`에 있습니다.
+예전 공개 시연 계정은 실제 DB 계정으로 등록하지 않았습니다.
+회원과 업무 데이터는 새로고침·서버 재기동 후에도 DB에 남으며, 서버 재기동 후에는 다시 로그인합니다.
 
 ```powershell
+.\mvnw.cmd test
+.\mvnw.cmd -Poracle-it verify
 node tools/check-ui.mjs
 ```
 
-추천·일정·중복 승인·검수·시연 인증 로직 검사 23개 통과. JavaScript 구문, 주요 경로의 HTML 생성, 로컬 HTTP 응답도 확인했습니다. 브라우저 제어 도구의 URL 확인 실패로 실제 렌더링·화면 클릭·반응형 및 실제 IndexedDB 통합 검증은 완료하지 못했습니다. 자세한 구현 범위는 [화면 구현 안내](docs/ui/README.md)를 참고하세요.
+Oracle 통합 검사는 테스트 데이터를 생성한 뒤 롤백하거나 테스트 데이터만 정리합니다.
+최초 DB 설치는 이미 완료했습니다. ERD 원본의 테이블명과 `SEQ_` 시퀀스 규칙을 사용합니다.
+자세한 구현·검증 범위와 브라우저 자동 검증 제한은 [설정 기록](docs/development/oracle-setup.md)에 있습니다.
+`preview.cmd`는 정적 파일 확인 전용이며 DB 기능에는 Spring Boot 서버가 필요합니다.

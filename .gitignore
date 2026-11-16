@@ -25,3 +25,21 @@ replay_pid*
 
 # Local reference extraction, preview classes and QA artifacts
 .work/
+
+# Build output
+target/
+
+# Local database credentials (keep examples safe for Git)
+.env
+.env.*
+!.env.example
+**/application-local*.properties
+**/application-local*.yml
+**/application-local*.yaml
+/config/*
+!/config/*.example
+
+# IDE-local settings may contain connection credentials
+.idea/
+.vscode/
+*.iml

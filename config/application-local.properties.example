@@ -1,0 +1,7 @@
+# Copy to config/application-local.properties (ignored by Git).
+# Environment variables with these names override this file.
+ORACLE_HOST=YOUR_DB_HOST
+ORACLE_PORT=YOUR_DB_PORT
+ORACLE_SID=YOUR_DB_SID
+ORACLE_USERNAME=YOUR_DB_USERNAME
+ORACLE_PASSWORD=YOUR_DB_PASSWORD

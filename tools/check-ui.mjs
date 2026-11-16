@@ -103,15 +103,23 @@ export async function runChecks() {
     const fixed=applyRecordChange(complete.records,inspection('maintenance_complete','returned',5,{expectedEquipmentVersion:complete.equipmentStates.cam01.version,confirmed:true,memo:'반환 수량 및 장비 정상 확인'}),complete.equipmentStates);
     assert.equal(fixed.status,'saved');assert.equal(equipmentRestrictions(fixed.records,fixed.equipmentStates).cam01,undefined);
   });
-  await test('시연 계정 로그인 및 잘못된 비밀번호 거부',async()=>{
-    assert.equal((await authenticate({name:'',email:'demo@campusrent.example',password:'Campus123!'},false)).role,'student');
-    await assert.rejects(()=>authenticate({name:'',email:'demo@campusrent.example',password:'wrong'},false));
+  await test('로그인은 서버 API와 CSRF 세션을 사용',async()=>{
+    const original=globalThis.fetch,calls=[];
+    try {
+      globalThis.fetch=async(url,options)=>{calls.push({url,options});return {ok:true,status:200,json:async()=>url.endsWith('/session')?{user:null,csrfToken:'test-csrf'}:{id:'42',name:'검증',role:'student'}};};
+      const user=await authenticate({name:'',email:'student@example.invalid',password:'Testing123!'},false);
+      assert.equal(user.id,'42');assert.equal(calls[0].url,'/api/session');
+      assert.equal(calls[1].url,'/api/auth/login');assert.equal(calls[1].options.credentials,'same-origin');
+      assert.equal(calls[1].options.headers['X-CSRF-Token'],'test-csrf');
+    } finally {globalThis.fetch=original;}
   });
-  await test('학생 가입·중복 계정·관리자 계정 구분',async()=>{
-    const email=`test-${Date.now()}@campusrent.example`;
-    assert.equal((await authenticate({name:'테스트 학생',email,password:'Testing123!'},true)).role,'student');
-    await assert.rejects(()=>authenticate({name:'테스트 학생',email,password:'Testing123!'},true));
-    assert.equal((await authenticate({name:'',email:'admin@campusrent.example',password:'CampusAdmin123!'},false)).role,'admin');
+  await test('서버 인증 실패 전달 및 가입 입력 검증',async()=>{
+    const original=globalThis.fetch;
+    try {
+      globalThis.fetch=async()=>({ok:false,status:401,json:async()=>({message:'인증 실패'})});
+      await assert.rejects(()=>authenticate({name:'',email:'student@example.invalid',password:'wrong'},false),/인증 실패/);
+      await assert.rejects(()=>authenticate({name:'',email:'bad',password:'short'},true));
+    } finally {globalThis.fetch=original;}
   });
   return results;
 }

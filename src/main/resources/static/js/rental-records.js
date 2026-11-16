@@ -1,4 +1,5 @@
-// Ported from the supplied Figma Make prototype; browser demo only.
+import { api } from './api-client.js';
+// Persistence uses the Oracle API. Pure transition helpers below are regression fixtures only.
 import { availability, resources } from "./rental-data.js";
 import { applyInspection, equipmentRestrictions, validCheckout, validReturnHistory, validEquipmentStates } from "./equipment-inspection.js";
 export const ended = (item)=>item.stage === "returned" || item.stage === "rejected" || item.stage === "cancelled";
@@ -85,56 +86,13 @@ export function scheduleSummary(condition, kind) {
     return kind === "장비" ? `수령 ${condition.start.replace("T", " ")} · 반납 ${condition.end.replace("T", " ")} · 총 대여기간 ${period}` : `이용 ${condition.start.replace("T", " ")} ~ ${condition.end.replace("T", " ")} · ${condition.people}명 · ${condition.use || "목적 미선택"}`;
 }
 export const STORAGE_KEY = "campusrent.demo.records.v1";
-const validCondition = (value)=>{
-    if (!value || typeof value !== "object") return false;
-    const c = value;
-    return typeof c.start === "string" && typeof c.end === "string" && Number.isFinite(new Date(c.start).getTime()) && Number.isFinite(new Date(c.end).getTime()) && typeof c.people === "number" && Number.isFinite(c.people) && typeof c.use === "string";
-};
-function readStoredRecords() {
-    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
-    if (!Array.isArray(raw)) throw new Error("Invalid record storage");
-    return raw.filter((record)=>record && typeof record.number === "string" && typeof record.userId === "string" && typeof record.createdAt === "string" && Number.isFinite(new Date(record.createdAt).getTime()) && validCondition(record.condition) && Array.isArray(record.items) && record.items.every((item)=>item && typeof item.id === "string" && typeof item.name === "string" && typeof item.code === "string" && (item.version === undefined || Number.isSafeInteger(item.version) && item.version >= 0) && [
-                "장비",
-                "시설"
-            ].includes(item.kind) && [
-                "pending",
-                "approved",
-                "collected",
-                "return_requested",
-                "return_held",
-                "returned",
-                "rejected",
-                "cancelled"
-            ].includes(item.stage) && (item.rejectionReason === undefined || typeof item.rejectionReason === "string") && (item.checkoutSnapshot === undefined || validCheckout(item.checkoutSnapshot)) && (item.returnInspections === undefined || validReturnHistory(item.returnInspections)) && (item.returnHoldReason === undefined || typeof item.returnHoldReason === "string") && [
-                item.approvedAt,
-                item.collectedAt,
-                item.returnedAt,
-                item.rejectedAt,
-                item.updatedAt,
-                item.returnRequestedAt,
-                item.startedAt,
-                item.endedAt,
-                item.cancelledAt
-            ].every((timestamp)=>timestamp === undefined || typeof timestamp === "string" && Number.isFinite(new Date(timestamp).getTime())) && [
-                item.approvedBy,
-                item.collectedBy,
-                item.returnedBy,
-                item.rejectedBy,
-                item.startedBy,
-                item.endedBy,
-                item.cancelledBy
-            ].every((actor)=>actor === undefined || actor && typeof actor.id === "string" && [
-                    "admin",
-                    "student"
-                ].includes(actor.role)) && (item.condition === undefined || validCondition(item.condition))));
-}
 export const SIGNAL_KEY = `${STORAGE_KEY}.changed`;
 export const CHANNEL_NAME = "campusrent.demo.records.changed";
 export async function readRecordsIfAvailable() {
     return (await readRentalStateIfAvailable())?.records ?? null;
 }
 export async function readRentalStateIfAvailable() {
-    const result = await transactRecords();
+    const result = await api('/requests');
     return result.records ? {
         records: result.records,
         equipmentStates: result.equipmentStates ?? {}
@@ -310,154 +268,9 @@ export function applyRecordChange(records, change, equipmentStates = {}) {
             } : entry)
     };
 }
-const DATABASE_NAME = "campusrent.demo.records";
-function transactRecords(change, canWrite = ()=>true, currentActor = ()=>null) {
-    if (typeof indexedDB === "undefined") return Promise.resolve({
-        status: "unsupported"
-    });
-    return new Promise((resolve)=>{
-        let open;
-        try {
-            open = indexedDB.open(DATABASE_NAME, 1);
-        } catch  {
-            resolve({
-                status: "failed"
-            });
-            return;
-        }
-        let finished = false;
-        const finish = (result)=>{
-            if (!finished) {
-                finished = true;
-                resolve(result);
-            }
-        };
-        open.onupgradeneeded = ()=>{
-            open.result.createObjectStore("records", {
-                keyPath: "number"
-            });
-            open.result.createObjectStore("meta");
-        };
-        open.onerror = ()=>finish({
-                status: "failed"
-            });
-        open.onblocked = ()=>finish({
-                status: "failed"
-            });
-        open.onsuccess = ()=>{
-            const db = open.result;
-            if (finished) {
-                db.close();
-                return;
-            }
-            let tx;
-            try {
-                tx = db.transaction([
-                    "records",
-                    "meta"
-                ], "readwrite");
-            } catch  {
-                db.close();
-                finish({
-                    status: "failed"
-                });
-                return;
-            }
-            const store = tx.objectStore("records");
-            const meta = tx.objectStore("meta");
-            let result = {
-                status: "failed"
-            };
-            tx.oncomplete = ()=>{
-                db.close();
-                finish(result);
-            };
-            tx.onabort = tx.onerror = ()=>{
-                db.close();
-                finish({
-                    status: "failed"
-                });
-            };
-            const migrated = meta.get("legacyImported");
-            migrated.onsuccess = ()=>{
-                try {
-                    if (!migrated.result) {
-                        readStoredRecords().forEach((record)=>store.put(record));
-                        meta.put(true, "legacyImported");
-                    }
-                    const request = store.getAll();
-                    request.onsuccess = ()=>{
-                        const records = request.result;
-                        const stateRequest = meta.get("equipmentStates");
-                        stateRequest.onsuccess = ()=>{
-                            try {
-                                const equipmentStates = stateRequest.result ?? {};
-                                if (!validEquipmentStates(equipmentStates)) {
-                                    tx.abort();
-                                    return;
-                                }
-                                if (!change) {
-                                    result = {
-                                        status: "saved",
-                                        records,
-                                        equipmentStates
-                                    };
-                                    return;
-                                }
-                                if (!canWrite()) {
-                                    result = {
-                                        status: "cancelled",
-                                        records,
-                                        equipmentStates
-                                    };
-                                    return;
-                                }
-                                const active = currentActor();
-                                if (!active || active.id !== change.actor?.id || active.role !== change.actor?.role) {
-                                    result = {
-                                        status: "cancelled",
-                                        records,
-                                        equipmentStates,
-                                        message: "현재 로그인 계정이 변경되어 작업을 취소했습니다."
-                                    };
-                                    return;
-                                }
-                                result = applyRecordChange(records, change, equipmentStates);
-                                if (result.status === "saved") {
-                                    const number = change.type === "create" ? change.record.number : change.number;
-                                    store.put(result.records.find((record)=>record.number === number));
-                                    if (result.equipmentStates) meta.put(result.equipmentStates, "equipmentStates");
-                                    result = {
-                                        ...result,
-                                        equipmentStates: result.equipmentStates ?? equipmentStates
-                                    };
-                                } else result = {
-                                    ...result,
-                                    equipmentStates: result.equipmentStates ?? equipmentStates
-                                };
-                            } catch  {
-                                tx.abort();
-                            }
-                        };
-                    };
-                } catch  {
-                    tx.abort();
-                }
-            };
-        };
-    });
-}
 export async function persistRecords(change, canWrite = ()=>true, currentActor = ()=>null) {
-    const result = await transactRecords(change, canWrite, currentActor);
-    if (result.status === "saved") {
-        try {
-            localStorage.setItem(SIGNAL_KEY, crypto.randomUUID());
-        } catch  {}
-        try {
-            const channel = new BroadcastChannel(CHANNEL_NAME);
-            channel.postMessage("changed");
-            channel.close();
-        } catch  {}
-    }
-    return result;
+ if(!canWrite() || !currentActor()) return {status:'cancelled',message:'로그인 상태를 확인해주세요.'};
+ const result=await api('/requests',{method:'POST',body:change});
+ try { const channel=new BroadcastChannel(CHANNEL_NAME);channel.postMessage('changed');channel.close(); } catch {}
+ return result;
 }

@@ -1,5 +1,8 @@
 # CampusRent 화면 구현
 
+2026-11-16: 아래 화면을 Spring Boot / Oracle 업무 API에 연결했습니다.
+실행·계정·스키마와 검증 결과는 [Oracle 연동 안내](../development/oracle-setup.md)를 참고하세요.
+
 ## 기준 자료
 
 - 개발 스펙: 루트 [README](../../README.md)
@@ -27,50 +30,37 @@
 
 - `src/main/resources/templates/index.html`: 공통 HTML. 정적 자원에 `th:href`·`th:src`, 컨텍스트 경로에 `th:content`를 준비했습니다.
 - `src/main/resources/static/css/app.css`: 원본 색상·간격·카드·다이얼로그·반응형 스타일.
-- `src/main/resources/static/js/app.js`: 페이지 표시, 라우팅, 폼·선택 목록·시연 처리 연결.
+- `src/main/resources/static/js/app.js`: 페이지 표시, 라우팅, 폼·선택 목록·서버 API 처리 연결.
 - `rental-data.js`: 원본의 자원·추천·기간·대체 조회 규칙을 JavaScript로 전환.
-- `rental-records.js`, `equipment-inspection.js`: 원본의 가상 신청·구성품·상태 변경 및 IndexedDB 트랜잭션 로직을 전환.
-- `auth-service.js`, `auth-validation.js`: 메모리 기반 시연 로그인·회원가입. 실제 서버 인증으로 교체할 대상입니다.
+- `rental-records.js`, `equipment-inspection.js`: 서버 신청 조회·저장 어댑터와 구성품·상태 표시 계산. 순수 시연 상태 전이 함수는 회귀 테스트 참고용으로만 남아 있습니다.
+- `auth-service.js`, `auth-validation.js`: 서버 세션 로그인·회원가입 API와 입력 검사.
 - `static/assets/`, `static/fonts/`: ZIP의 SVG 14개와 폰트 3개.
 - `tools/PreviewServer.java`, `preview.cmd`: Java 표준 라이브러리로 정적 화면을 제공하는 로컬 전용 미리보기.
 - `tools/check-ui.mjs`: 외부 패키지가 필요 없는 로직 회귀 검사.
 
-React·TypeScript·Tailwind·Vite 런타임과 빌드 과정은 필요하지 않습니다. Spring Boot 표준 폴더를 사용하지만 Spring Boot 프로젝트 설정·컨트롤러·Thymeleaf 렌더링 엔진은 이번 화면 작업에 포함하지 않았습니다.
+React·TypeScript·Tailwind·Vite 런타임과 빌드 과정은 필요하지 않습니다. Spring Boot·Thymeleaf가 화면을 제공하며 Java 서비스가 Oracle을 조회·갱신합니다.
 
-## 시연 상태
+## 현재 저장 방식
 
-로그인 사용자와 신규 가입 계정은 메모리에만 유지되며 새로고침 시 초기화됩니다. 비밀번호와 인증 토큰은 브라우저 저장소에 기록하지 않습니다. 선택 목록은 sessionStorage, 가상 신청·검수·장비 상태는 IndexedDB에 보존합니다. 브라우저 저장소를 사용할 수 없으면 저장 실패를 표시합니다.
+회원은 Oracle에 해시된 비밀번호로 저장하고 서버 세션으로 로그인합니다. 신청·검수·점검·시설 이용 이력도 Oracle에 보존합니다.
+로그인 선택 목록은 DB, 비로그인 선택 목록은 sessionStorage를 사용합니다. 기존 IndexedDB 기록은 가져오지 않습니다.
+자원 12개는 가상 자료 표시를 유지합니다. 활동 문장 분석과 추천 화면 계산은 기존 JavaScript 규칙을 사용하며,
+실제 신청 가능 여부·권한·상태 전이·승인 중복은 서버가 다시 검사합니다.
 
-승인 대기는 자원 확보 상태가 아닙니다. 승인 시 기간 중복과 장비 제한을 재확인하고, 신청·장비의 버전을 비교해 오래된 검수 요청을 차단합니다. 출고 당시 구성품 기준과 누적 반환 내역을 보존합니다. 누락 구성품이 있으면 반납을 보류하며, 반납 완료와 장비 점검 완료를 구분합니다. 이들은 화면 흐름을 위한 로컬 시연이며 서버 권한 검사·실제 예약·다중 사용자 DB 처리를 대신하지 않습니다.
-
-## 실행과 검증
-
-루트에서 실행합니다. JDK 8 이상의 `java`·`javac`가 필요합니다.
-
-```powershell
-.\preview.cmd
-# 포트를 바꾸려면: .\preview.cmd 8081
-```
-
-`http://127.0.0.1:8080`에서 확인합니다. 시연 계정은 루트 README와 로그인 창의 ‘시연 계정 안내’에 있습니다. 종료는 `Ctrl+C`입니다. JavaScript 로직 검사에는 선택적으로 Node.js 22 이상을 사용합니다.
+## 실행과 검사
 
 ```powershell
+.\mvnw.cmd spring-boot:run
+.\mvnw.cmd test
+.\mvnw.cmd -Poracle-it verify
 node tools/check-ui.mjs
 ```
 
-확인한 내용:
+기본 주소는 http://127.0.0.1:8080 입니다. 학생은 화면에서 회원가입하고,
+관리자는 Git 제외 파일 `config/admin-login.txt`의 계정으로 로그인합니다.
+서버 재기동 후 회원과 신청 데이터는 보존되지만 로그인 세션은 다시 만들어야 합니다.
+`preview.cmd`는 정적 파일 확인 전용이며 새 API 기반 화면 기능은 지원하지 않습니다.
 
-- 로컬 JDK 8 컴파일·미리보기 서버 실행 및 HTTP 응답.
-- JavaScript 모듈 6개의 구문과 가져오기.
-- 7개 페이지 경로와 인원 포함 추천 경로의 HTML 생성. DOM 대체 객체를 사용한 검사이며 실제 화면 렌더링 검사가 아닙니다.
-- 원본 자원 수, 활동 인식·인원, 일정·운영 제한, 대체 조회, 신청 소유권, 승인 경쟁, 구성품 출고·보류·추가 반환·점검, 시연 인증 등 로직 검사 23개.
-
-**미검증:** 실제 브라우저 렌더링·클릭 흐름·모바일 배치·IndexedDB 통합. 브라우저 제어 도구가 Windows의 현재 URL을 확인하지 못해 자동 화면 검증이 중단됐습니다. Spring Boot·Oracle 통합 검증도 수행하지 않았습니다.
-
-## 다음 단계
-
-1. 로컬 미리보기에서 원본과 화면·모바일 배치·신청·관리자 흐름을 비교 검토합니다.
-2. JDK·Spring Boot 버전 및 MyBatis/JDBC 방식을 팀 기준으로 확정합니다.
-3. Spring MVC 경로·Thymeleaf 렌더링을 연결하고 시연 인증·저장을 서버 세션·서비스·DAO 호출로 교체합니다.
-4. ERD를 검토해 Oracle 스키마·초기 데이터를 작성하고 승인·검수 처리를 DB 트랜잭션으로 구현합니다.
-5. 원본에서 후속 범위로 분류한 장비 관리(F08), 대체 관계 관리(F17 관리 부분), 시설 운영 관리(F21) 화면은 별도 설계 후 구현합니다.
+JavaScript 회귀 검사 23개와 MVC 경로 7개를 검사했습니다.
+Oracle 통합 검사는 학생 소유권·역할 위조·CSRF·선택 목록·중복 승인·출고·부분 반납·추가 반환·점검·시설 이용을 확인합니다.
+실제 브라우저 클릭·반응형 검사는 Windows의 현재 브라우저 URL을 확인할 수 없어 완료하지 못했습니다.
