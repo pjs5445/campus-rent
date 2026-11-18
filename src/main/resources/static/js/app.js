@@ -1,11 +1,13 @@
 import { resources, purposes, initialConditions, analyzeInput, recommendations, recommendationItems,
   availability, conditionErrors, alternateResources, alternateSlots, localDate, purposeSubmissionPeople } from './rental-data.js';
-import { readRentalStateIfAvailable, persistRecords, reservationBlocks, stageLabel, ended,
+import { readRentalStateIfAvailable, persistRecords, refreshAfterSave, reservationBlocks, stageLabel, ended,
   scheduleSummary, addHours, processingHistory, SIGNAL_KEY, CHANNEL_NAME } from './rental-records.js';
 import { equipmentRestrictions, returnTotals } from './equipment-inspection.js';
 import { authenticate, currentUser, logout } from './auth-service.js';
 import { api } from './api-client.js';
 import { setServerCatalog } from './rental-data.js';
+import { filterResources, conditionsMatch } from './browse-view.js';
+import { studentFilters, studentRecords, studentGuidance, receiptRecord } from './student-records.js';
 
 // Oracle persistence and authorization are handled by the server APIs.
 const $ = (s, root = document) => root.querySelector(s);
@@ -18,7 +20,7 @@ const button = (action, text, attrs = '', cls = '') => `<button type="button" cl
 const notice = '<p class="notice">시연용 가상 시설·장비입니다. 실제 학교 재고와 운영 정책은 확인이 필요하며, 관리자 승인 전에는 이용이 확정되지 않습니다.</p>';
 const drafts = {equipment:{...initialConditions}, facility:{...initialConditions}};
 const state = { user:null, records:[], equipmentStates:{}, selected:{}, conditions:{equipment:null,facility:null},
-  activity:'', purpose:'', peopleSource:{activity:'',manuallyEdited:false}, category:'전체', query:'', adminFilter:'all', busy:false };
+  activity:'', purpose:'', peopleSource:{activity:'',manuallyEdited:false}, category:'전체', query:'', availableOnly:false, adminFilter:'all', recordsFilter:'all', recordsSort:'schedule', busy:false };
 const sessionKey = 'campusrent.ui.selection.v1';
 let selectionSave = Promise.resolve();
 try {
@@ -50,16 +52,31 @@ function saveSelection() {
   try { sessionStorage.setItem(sessionKey, JSON.stringify(state.selected)); }
   catch { toast('브라우저 저장소를 사용할 수 없어 선택 목록은 현재 화면에서만 유지됩니다.', true); }
 }
-function go(url, replace = false) {
+function go(url, replace = false, preservePosition = false) {
   const target = new URL(url, location.origin);
   if (target.origin !== location.origin) return;
   if (modal.open) modal.close();
   history[replace ? 'replaceState' : 'pushState']({}, '', target.pathname + target.search + target.hash);
-  syncRoute(); render(); window.scrollTo(0,0); $('#main').focus({preventScroll:true});
+  const scrollY = window.scrollY;
+  syncRoute(); render();
+  if (preservePosition) {
+    window.scrollTo(0, scrollY);
+    ($('#browse-results')||$('#student-records'))?.focus({preventScroll:true});
+  } else { window.scrollTo(0,0); $('#main').focus({preventScroll:true});focusRequestedRecord(); }
+}
+function focusRequestedRecord() {
+  if(!['/records','/history'].includes(path()))return;
+  const number=new URLSearchParams(location.search).get('request');
+  if(!number)return;
+  const card=document.getElementById('request-'+number);
+  if(card){card.focus({preventScroll:true});card.scrollIntoView({block:'start'});}
 }
 function syncRoute() {
   const params = new URLSearchParams(location.search);
   state.query = params.get('q') || ''; state.category = params.get('category') || '전체';
+  state.availableOnly = params.get('available') === '1';
+  state.recordsFilter = studentFilters(path()==='/history').some(([key])=>key===params.get('status')) ? params.get('status') : 'all';
+  state.recordsSort = params.get('sort') === 'newest' ? 'newest' : 'schedule';
   if (path() === '/purpose' || path() === '/') {
     const activity = params.get('activity') || '';
     if (activity !== state.activity) { state.activity = activity; state.purpose = ''; }
@@ -74,7 +91,7 @@ function syncRoute() {
 function header() {
   const user = state.user;
   $('#header').innerHTML = `${link('/', `<span class="brand-icon">${icon('9dd8c.svg')}</span><span class="brand-word">Campus<span>Rent</span></span>`, 'brand')}
-    <nav class="main-nav" aria-label="주요 메뉴">${[['/equipment','장비 대여'],['/facilities','시설 대여'],['/purpose','목적별 대여']].map(([p,t]) => link(p,t,path()===p?'active':'')).join('')}</nav>
+    <nav class="main-nav" aria-label="주요 메뉴">${[['/equipment','장비 대여'],['/facilities','시설 대여'],['/purpose','목적별 대여']].map(([p,t]) => `<a href="${href(p)}" data-route ${path()===p?'class="active" aria-current="page"':''}>${t}</a>`).join('')}</nav>
     <div class="account">${user ? `${link(user.role==='admin'?'/admin':'/records',user.role==='admin'?'신청 관리':'내 신청','btn small')}<span class="user-name">${esc(user.name)}</span>${button('logout','로그아웃','','small')}` : button('login','로그인','','primary')}</div>`;
   document.querySelectorAll('.footer-brand').forEach(a=>a.href=href('/'));
 }
@@ -89,7 +106,7 @@ function home() {
     <h1>하고 싶은 활동에 맞춰,<br>공간과 장비를 찾아보세요.</h1>
     <p class="hero-description">필요한 것이 정해져 있다면 직접 찾고, 처음이라면 목적에 맞는 추천으로 시작하세요.</p>
     <form class="purpose-search" data-form="home-purpose"><label for="home-activity">어떤 활동을 준비하고 계신가요?</label>
-      <div class="search-input">${icon('8adc4.svg')}<input id="home-activity" name="activity" value="${esc(state.activity)}" placeholder="예: 팀 과제 인터뷰 영상을 촬영하고 싶어요" autocomplete="off"><button class="btn primary">목적에 맞게 추천받기</button></div>
+      <div class="search-input">${icon('8adc4.svg')}<input id="home-activity" name="activity" value="${esc(state.activity)}" placeholder="예: 팀 과제 인터뷰 영상을 촬영하고 싶어요" autocomplete="off" required><button class="btn primary">목적에 맞게 추천받기</button></div>
       <div class="keyword-row"><span>추천 키워드</span>${[...purposes,'기타'].map(p=>`<button type="button" class="chip" data-action="keyword" data-value="${p}" aria-pressed="${state.activity===p}">${p}</button>`).join('')}</div>
     </form></section>
     <section class="home-section container"><h2>필요한 것이 정해져 있나요?</h2><div class="quick-grid">
@@ -112,10 +129,11 @@ function fields(kind, c, prefix = kind) {
 }
 function conditionPanel(kind) {
   const c = state.conditions[kind];
-  return `<form class="panel" data-form="condition" data-kind="${kind}"><h2>${kind==='equipment'?'장비 대여기간':'시설 이용 조건'}</h2>${fields(kind,drafts[kind])}
+  const changed = c && !conditionsMatch(drafts[kind], c, kind);
+  return `<form class="panel condition-panel" data-form="condition" data-kind="${kind}"><div class="row between"><h2>${kind==='equipment'?'장비 대여기간':'시설 이용 조건'}</h2><span class="badge ${c?'blue':''}">${c?'조회 조건 적용됨':'일정을 먼저 설정해주세요'}</span></div><p class="small muted">${kind==='equipment'?'수령·반납 일시':'이용 시간·인원·목적'}를 적용하면 이용 가능 여부를 확인할 수 있습니다.</p>${fields(kind,drafts[kind])}
     <div class="dialog-actions"><button class="btn primary">조건 적용하고 조회</button></div><p class="form-error" role="alert" hidden></p>
-    <p class="small muted draft-warning" hidden>작성 중인 조건이 조회 기준과 다릅니다. 조건을 적용하고 다시 조회해주세요.</p></form>
-    ${c?`<p class="condition-summary">${esc(scheduleSummary(c,kind==='equipment'?'장비':'시설'))}</p>`:''}`;
+    <p class="notice warn draft-warning" role="status" ${changed?'':'hidden'}>작성 중인 조건은 아직 적용되지 않았습니다. ‘조건 적용하고 조회’를 눌러주세요.</p>
+    ${c?`<p class="condition-summary"><strong>현재 조회 기준</strong><br>${esc(scheduleSummary(c,kind==='equipment'?'장비':'시설'))}</p>`:''}</form>`;
 }
 function empty(title, description, action = '') { return `<div class="empty"><div class="empty-symbol" aria-hidden="true">⌕</div><h3>${title}</h3><p>${description}</p>${action}</div>`; }
 function card(r, role = '', c = currentCondition(r), allowToggle = true) {
@@ -133,20 +151,27 @@ function card(r, role = '', c = currentCondition(r), allowToggle = true) {
 }
 function selection() {
   const items = Object.entries(state.selected);
-  return `<aside class="selection" id="selection" aria-label="선택 목록"><h2>선택 목록 <span class="selection-count">${items.length}</span></h2><p class="small muted">필요한 항목과 이용 조건을 확인하세요.</p>
+  return `<aside class="selection" id="selection" tabindex="-1" aria-label="선택 목록"><div class="row between"><h2>선택 목록 <span class="selection-count">${items.length}</span></h2>${button('back-to-results','목록으로','','small mobile-only')}</div><p class="small muted">필요한 항목과 이용 조건을 확인하세요.</p>
     ${items.length?items.map(([id,c])=>{const r=resource(id);return `<div class="selection-item"><span class="badge">${r.kind}</span><h3>${r.name}</h3><p>${esc(scheduleSummary(c,r.kind))}</p><div class="row">${button('edit-selection','조건 수정',`data-id="${id}"`,'small')}${button('remove','제거',`data-id="${id}"`,'small')}${button('request','신청하기',`data-id="${id}"`,'primary small')}</div></div>`;}).join(''):`<div class="selection-empty">아직 선택한 항목이 없습니다.<br>목록에서 필요한 자원을 선택하세요.</div>`}
     <div class="selection-foot"><p>항목별로 개별 신청합니다.<br>로그인만으로 신청이 제출되지 않습니다.</p>${link('/records','내 신청 현황 확인','btn full')}</div></aside>`;
+}
+function selectionShortcut() {
+  const count = Object.keys(state.selected).length;
+  return `<div class="selection-shortcut"><div><strong>선택한 항목 ${count}개</strong><span>${count?'조건 확인 후 개별 신청하세요.':'이용 조건을 적용하고 항목을 선택하세요.'}</span></div>${button('view-selection','선택 목록 보기','','primary')}</div>`;
 }
 function heading(title,description) { return `<div class="page-heading"><p class="breadcrumb">${link('/','홈')} / ${title}</p><h1>${title}</h1><p>${description}</p></div>`; }
 function browse(kind) {
   const title = kind === 'equipment'?'장비 대여':'시설 대여';
   const pool = resources.filter(r=>kindKey(r)===kind);
-  const filtered = pool.filter(r=>(state.category==='전체'||r.category===state.category) && [r.name,r.model,r.code,r.location,r.category,...r.specs,...r.contents].join(' ').toLowerCase().includes(state.query.toLowerCase()));
-  return `${heading(title,kind==='equipment'?'필요한 장비와 구성품을 확인하고, 원하는 기간에 대여를 신청하세요.':'인원과 활동 목적에 맞는 공간을 찾고, 이용 시간을 선택하세요.')}${conditionPanel(kind)}
-    <form class="search-bar" data-form="search"><input name="q" aria-label="${title} 검색" value="${esc(state.query)}" placeholder="${kind==='equipment'?'장비명, 모델, 관리번호 검색':'시설명, 위치, 비치 설비 검색'}"><button class="btn primary">검색</button>${button('reset-search','초기화')}</form>
+  const availableOnly = state.availableOnly && Boolean(state.conditions[kind]);
+  const filtered = filterResources(pool, {...state, availableOnly}, r=>check(r).length===0);
+  return `${heading(title,kind==='equipment'?'필요한 장비와 구성품을 확인하고, 원하는 기간에 대여를 신청하세요.':'인원과 활동 목적에 맞는 공간을 찾고, 이용 시간을 선택하세요.')}
+    <section class="panel browse-search" aria-label="검색 및 분류"><form class="search-bar" data-form="search"><label class="sr-only" for="resource-search">${title} 검색</label><input id="resource-search" type="search" name="q" value="${esc(state.query)}" placeholder="${kind==='equipment'?'장비명, 모델, 관리번호 검색':'시설명, 위치, 비치 설비 검색'}"><button class="btn primary">검색</button>${button('reset-search','초기화')}</form>
     <div class="filter-row" aria-label="분류">${['전체',...new Set(pool.map(r=>r.category))].map(c=>`<button class="chip" data-action="category" data-value="${c}" aria-pressed="${state.category===c}">${c}</button>`).join('')}</div>
-    <div class="result-summary"><span>전체 <strong>${filtered.length}</strong>개</span><span class="small">개별 자원 기준</span></div>
-    ${filtered.length?`<div class="resource-grid">${filtered.map(r=>card(r)).join('')}</div>`:empty('검색 결과가 없습니다.','검색어 또는 분류를 바꿔 다시 찾아보세요.',button('reset-search','검색어·분류 초기화'))}`;
+    </section>${conditionPanel(kind)}
+    <section id="browse-results" tabindex="-1" aria-label="조회 결과"><div class="result-summary"><span role="status">${state.query||state.category!=='전체'||availableOnly?'검색 결과':'전체'} <strong>${filtered.length}</strong>개 <span class="small">/ ${pool.length}개</span></span><label class="check-label"><input type="checkbox" data-action="available-only" ${availableOnly?'checked':''} ${state.conditions[kind]?'':'disabled'}>이용 가능한 항목만</label></div>
+    ${!state.conditions[kind]?'<p class="small muted">일정을 적용하면 이용 가능한 항목만 모아 볼 수 있습니다.</p>':''}
+    ${filtered.length?`<div class="resource-grid">${filtered.map(r=>card(r)).join('')}</div>`:empty('조건에 맞는 자원이 없습니다.','검색어·분류 필터를 초기화하거나 이용 일정을 변경해보세요.',button('reset-search','검색 필터 초기화'))}</section>`;
 }
 function purposeView() {
   const analysis=analyzeInput(state.activity), chosen=state.purpose;
@@ -160,7 +185,7 @@ function purposeView() {
     const items=recommendationItems(chosen,analysis,fc,state.conditions.equipment,blocks(),restrictions(),drafts.facility.people);
     result=`<div class="recommendation-intro"><span class="badge blue">목적별 추천</span><h2 style="margin-top:8px">${esc(chosen)}에 맞는 구성</h2><p>${recommendations[chosen].reason}</p></div>
       ${analysis.peopleStatus==='ambiguous'||analysis.peopleStatus==='invalid'?'<p class="notice warn">참여 인원이 불명확합니다. 시설 이용 인원을 직접 확인해주세요.</p>':''}
-      <details class="panel" ${state.conditions.facility||state.conditions.equipment?'open':''}><summary>이용 일정과 조건 설정</summary><div class="stack">${conditionPanel('facility')}${conditionPanel('equipment')}</div></details>
+      <details class="panel" open><summary>이용 일정과 조건 설정</summary><div class="stack">${conditionPanel('facility')}${conditionPanel('equipment')}</div></details>
       <div class="result-summary"><span>추천 자원 <strong>${items.length}</strong>개</span><span class="small">필요한 항목만 선택하세요.</span></div>
       ${!fc||!state.conditions.equipment?'<p class="notice">일정 미입력 상태의 준비 구성입니다. 실제 이용 가능 여부는 해당 자원의 조건을 적용한 뒤 확인할 수 있습니다.</p>':''}
       ${items.length?`<div class="resource-grid">${items.map(i=>card(i.resource,i.role,i.resource.kind==='시설'?fc:state.conditions.equipment)).join('')}</div>`:empty('조건에 맞는 추천 자원이 없습니다.','인원과 목적을 확인하거나 다른 시설·장비를 직접 검색해주세요.')}`;
@@ -189,15 +214,35 @@ function recordItem(record,item,index,admin) {
     if(item.stage==='pending') actions+=button('transition','신청 취소',`${attrs} data-to="cancelled"`,'small');
     if(item.kind==='장비'&&item.stage==='collected') actions+=button('transition','반납 신청',`${attrs} data-to="return_requested"`,'primary small');
   }
+  const guidance=studentGuidance(item,item.condition||record.condition);
   return `<div class="record-item"><div class="row between"><h3>${index+1}. ${esc(item.name)}</h3><span class="badge ${ended(item)?'':'blue'}">${stageLabel(item)}</span></div>
     <p class="muted">${esc(scheduleSummary(item.condition||record.condition,item.kind))}</p>
-    ${item.stage==='pending'?'<p class="small muted">관리자 승인 전이며 자원이 확보되지 않았습니다.</p>':''}
+    ${!admin?`<div class="next-action ${guidance.warning?'warn':''}"><strong>${esc(guidance.title)}</strong><p>${esc(guidance.description)}</p></div>`:item.stage==='pending'?'<p class="small muted">관리자 승인 전이며 자원이 확보되지 않았습니다.</p>':''}
     ${item.rejectionReason?`<p class="notice warn">거절 사유: ${esc(item.rejectionReason)}</p>`:''}${item.returnHoldReason?`<p class="notice warn">반납 보류: ${esc(item.returnHoldReason)}</p>`:''}
-    ${historyDetails(item)}<div class="row">${actions}</div></div>`;
+    <div class="row record-actions">${actions}${!admin&&['rejected','cancelled'].includes(item.stage)?link(item.kind==='장비'?'/equipment':'/facilities','다시 찾아보기','btn small'):''}</div>${historyDetails(item)}</div>`;
+}
+function studentRecordsView(history) {
+  const own=state.records.filter(record=>record.userId===state.user.id);
+  const all=own.flatMap(record=>record.items).filter(item=>ended(item)===history);
+  const active=own.flatMap(record=>record.items).filter(item=>!ended(item));
+  const records=studentRecords(own,state.user.id,{history,status:state.recordsFilter,sort:state.recordsSort});
+  const highlighted=new URLSearchParams(location.search).get('request');
+  const count=records.reduce((sum,record)=>sum+record.items.length,0);
+  return `<div class="container records-page student-records-page">${heading(history?'과거 신청 내역':'내 신청 현황',history?'완료·거절·취소된 신청과 처리 이력을 확인하세요.':'승인 결과부터 이용·반납까지, 다음에 할 일을 확인하세요.')}
+    <nav class="tabs" aria-label="신청 내역 구분">${link('/records','진행 중 신청','btn '+(!history?'primary':''))}${link('/history','과거 내역','btn '+(history?'primary':''))}</nav>
+    ${!history?`<div class="stat-grid student-stats">${[['승인 대기',active.filter(i=>i.stage==='pending').length],['승인 완료',active.filter(i=>i.stage==='approved').length],['이용·반납 진행',active.filter(i=>['collected','return_requested','return_held'].includes(i.stage)).length]].map(([label,n])=>`<div class="stat"><span>${label}</span><strong>${n}<small>건</small></strong></div>`).join('')}</div>`:''}
+    <section class="panel records-toolbar" aria-label="신청 상태 필터"><div class="filter-row">${studentFilters(history).map(([key,label])=>`<button type="button" class="chip" data-action="student-filter" data-value="${key}" aria-pressed="${state.recordsFilter===key}">${label} <span>${key==='all'?all.length:all.filter(i=>i.stage===key).length}</span></button>`).join('')}</div>
+      <div class="row between records-tools">${!history?`<label class="sort-label" for="records-sort">정렬<select id="records-sort"><option value="schedule" ${state.recordsSort==='schedule'?'selected':''}>가까운 일정순</option><option value="newest" ${state.recordsSort==='newest'?'selected':''}>최근 신청순</option></select></label>`:'<span class="small muted">최근 신청순</span>'}${button('refresh-records','최신 상태 조회','','small')}</div></section>
+    ${!history?'<p class="small muted sort-note">가까운 일정순은 시작 일시를 기준으로 하며, 이용·반납 진행 중에는 종료 일시를 기준으로 표시합니다. 지난 일정 중 미완료 항목은 먼저 표시됩니다.</p>':''}
+    <section id="student-records" tabindex="-1" aria-label="신청 조회 결과"><p class="result-summary" role="status">신청 항목 ${count}건</p>
+    ${records.length?records.map(record=>`<article class="panel record ${highlighted===record.number?'record-highlight':''}" id="request-${esc(record.number)}" tabindex="-1"><div class="row between record-heading"><div>${highlighted===record.number?'<span class="badge blue">선택한 신청</span>':''}<h2>신청 ${esc(record.number)}</h2></div><span class="small muted">접수 ${esc(new Date(record.createdAt).toLocaleString('ko-KR'))}</span></div>${record.items.map((item,index)=>recordItem(record,item,index,false)).join('')}</article>`).join(''):
+      state.recordsFilter!=='all'?empty('해당 상태의 신청이 없습니다.','다른 상태를 선택하거나 전체 신청을 확인해주세요.',button('student-filter','전체 보기','data-value="all"','primary')):
+      empty(history?'아직 과거 신청 내역이 없습니다.':'진행 중인 신청이 없습니다.',history?'완료·거절·취소된 신청이 이곳에 표시됩니다.':'필요한 장비나 시설을 찾아 신청을 시작해보세요.',`<div class="row empty-actions">${link('/equipment','장비 찾아보기','btn primary')}${link('/facilities','시설 찾아보기','btn')}</div>`)}</section></div>`;
 }
 function recordsView(admin=false, history=false) {
   const title=admin?'신청 관리':history?'과거 신청 내역':'내 신청 현황';
   if (!state.user || (admin && state.user.role!=='admin') || (!admin && state.user.role!=='student')) return `<div class="container records-page">${heading(title,'로그인한 계정의 권한에 맞는 신청 내역을 확인합니다.')}${empty(admin?'관리자 로그인이 필요합니다.':'학생 로그인이 필요합니다.','학생 또는 관리자 계정으로 로그인해주세요.',button('login','로그인','','primary'))}</div>`;
+  if(!admin)return studentRecordsView(history);
   const records=state.records.filter(r=>admin||r.userId===state.user.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
   const all=records.flatMap(r=>r.items);
   const filter=item=>admin?(state.adminFilter==='all'||item.stage===state.adminFilter):ended(item)===history;
@@ -207,10 +252,16 @@ function recordsView(admin=false, history=false) {
     ${records.some(r=>r.items.some(filter))?records.filter(r=>r.items.some(filter)).map(r=>`<article class="panel record"><div class="row between record-heading"><h3>신청 ${esc(r.number)}</h3><span class="small muted">${esc(new Date(r.createdAt).toLocaleString('ko-KR'))}${admin?' · '+esc(r.userId):''}</span></div>${r.items.map((i,index)=>filter(i)?recordItem(r,i,index,admin):'').join('')}</article>`).join(''):empty('표시할 신청 내역이 없습니다.',admin?'학생이 신청하면 이곳에서 처리할 수 있습니다.':'필요한 자원을 찾아 이용 신청을 시작해보세요.',link('/equipment','장비 찾아보기','btn'))}</div>`;
 }
 function render() {
+  const active = document.activeElement;
+  const focusSelector = active?.id ? `#${CSS.escape(active.id)}` : active?.dataset.action
+    ? `[data-action="${CSS.escape(active.dataset.action)}"]${active.dataset.id?`[data-id="${CSS.escape(active.dataset.id)}"]`:''}${active.dataset.value?`[data-value="${CSS.escape(active.dataset.value)}"]`:''}` : null;
   header(); const p=path();
-  $('#main').innerHTML = p==='/'?home():['/equipment','/facilities','/purpose'].includes(p)?`<div class="container workspace"><div class="workspace-content">${notice}${p==='/purpose'?purposeView():browse(p==='/equipment'?'equipment':'facility')}</div>${selection()}</div>`:p==='/records'||p==='/history'?recordsView(false,p==='/history'):p==='/admin'?recordsView(true):`<div class="container records-page">${empty('페이지를 찾을 수 없습니다.','메인으로 돌아가 다시 탐색해주세요.',link('/','메인으로','btn primary'))}</div>`;
+  const browsing = ['/equipment','/facilities','/purpose'].includes(p);
+  document.body.classList.toggle('has-selection-shortcut', browsing);
+  $('#main').innerHTML = p==='/'?home():browsing?`<div class="container workspace"><div class="workspace-content">${p==='/purpose'?purposeView():browse(p==='/equipment'?'equipment':'facility')}<div class="catalog-notice">${notice}</div></div>${selection()}</div>${selectionShortcut()}`:p==='/records'||p==='/history'?recordsView(false,p==='/history'):p==='/admin'?recordsView(true):`<div class="container records-page">${empty('페이지를 찾을 수 없습니다.','메인으로 돌아가 다시 탐색해주세요.',link('/','메인으로','btn primary'))}</div>`;
   const names={'/':'홈','/equipment':'장비 대여','/facilities':'시설 대여','/purpose':'목적별 대여','/records':'내 신청','/history':'과거 내역','/admin':'신청 관리'};
   document.title=`${names[p]||'페이지 없음'} | CampusRent`;
+  if (focusSelector && !modal.open) $(focusSelector)?.focus({preventScroll:true});
 }
 function openModal(title,body,context=null) {
   if(!modal.open) lastFocus=document.activeElement;
@@ -233,9 +284,11 @@ function showDetail(id) {
 }
 function toggleSelection(id) {
   const r=resource(id); if(!r) return;
-  if(state.selected[id]) delete state.selected[id];
+  const removing = Boolean(state.selected[id]);
+  if(removing) delete state.selected[id];
   else { const errors=check(r); if(errors.length) return toast(errors.join(' '),true); state.selected[id]={...currentCondition(r)}; }
   saveSelection(); render(); if(modal.open) modal.close();
+  toast(removing?`${r.name}을(를) 선택 목록에서 제거했습니다.`:`${r.name}을(를) 담았습니다. 선택 목록에서 신청할 수 있습니다.`);
 }
 function editSelection(id) {
   const r=resource(id),c=state.selected[id]; if(!r||!c)return;
@@ -268,6 +321,16 @@ function showRequest(id) {
     <p class="notice ${errors.length?'warn':''}">${errors.length?errors.map(esc).join('<br>'):'신청하면 승인 대기 상태로 접수됩니다. 관리자 승인 전에는 자원이 확보되지 않습니다.'}</p>
     <form data-form="request" data-id="${id}"><label class="check-label"><input type="checkbox" name="confirmed" required>이용 조건과 신청 내용을 확인했습니다.</label><p class="form-error" role="alert" hidden></p><div class="dialog-actions">${button('close','돌아가기')}<button class="btn primary" ${errors.length?'disabled':''}>최종 신청 제출</button></div></form>`);
 }
+function showReceipt(result) {
+  const record = receiptRecord(result,state.user?.id);
+  const item = record?.items[0];
+  openModal('신청 접수 완료',`<div class="receipt-heading"><span class="receipt-check" aria-hidden="true">✓</span><h3>신청이 접수되었습니다</h3><p>관리자 승인 후 예약이 확정됩니다.</p></div>
+    ${record&&item?`<dl class="receipt-details"><dt>신청 번호</dt><dd class="receipt-number">${esc(record.number)}</dd><dt>신청 항목</dt><dd>${esc(item.name)}</dd><dt>이용 일정</dt><dd>${esc(scheduleSummary(item.condition||record.condition,item.kind))}</dd><dt>접수 상태</dt><dd><span class="badge blue">${esc(stageLabel(item))}</span></dd><dt>접수 시각</dt><dd>${esc(new Date(record.createdAt).toLocaleString('ko-KR'))}</dd></dl>`:'<p class="notice">신청은 저장되었습니다. 내 신청 현황에서 접수 번호와 이용 일정을 확인해주세요.</p>'}
+    <p class="notice">승인 대기 중에는 내 신청 현황에서 취소할 수 있습니다. 선택 목록의 다른 항목은 각각 신청해주세요.</p>
+    ${result.availabilityRefreshFailed?'<p class="notice warn">접수는 완료되었지만 이용 가능 정보 갱신이 지연되고 있습니다. 같은 신청을 다시 제출하지 말고 내 신청 현황을 확인해주세요.</p>':''}
+    <div class="dialog-actions receipt-actions">${button('close','계속 둘러보기')}${link('/records'+(record?'?request='+encodeURIComponent(record.number):''),'내 신청 확인','btn primary')}</div>`);
+  $('#modal-title').setAttribute('tabindex','-1');$('#modal-title').focus();
+}
 function recordContext(number,id) {
   const record=state.records.find(r=>r.number===number), item=record?.items.find(i=>i.id===id);
   return record&&item?{record,item}:null;
@@ -277,7 +340,8 @@ async function commitChange(change) {
   const result=await persistRecords(change,()=>Boolean(state.user),()=>state.user);
   if(result.records)state.records=result.records;
   if(result.equipmentStates)state.equipmentStates=result.equipmentStates;
-  if(result.status==='saved'){ const reservations=await api('/availability');setServerCatalog(resources,reservations); }
+  // A follow-up read failure must never turn a successful write into a failed submission.
+  await refreshAfterSave(result,async()=>setServerCatalog(resources,await api('/availability')));
   if(result.status!=='saved')throw new Error(result.message || (result.status==='conflict'?'다른 창에서 상태가 변경되었습니다. 창을 닫고 최신 상태에서 다시 확인해주세요.':'저장하지 못했습니다. 서버 연결 상태를 확인해주세요.'));
   return result;
 }
@@ -302,6 +366,7 @@ function showInspection(number,id,type) {
 }
 
 document.addEventListener('click', async event => {
+  if(state.busy&&modal.open){event.preventDefault();return;}
   const anchor=event.target.closest('a[data-route]');
   if(anchor && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.button===0){event.preventDefault();go(anchor.href);return;}
   const el=event.target.closest('[data-action]'); if(!el||el.disabled)return;
@@ -311,9 +376,12 @@ document.addEventListener('click', async event => {
     else if(action==='keyword'){const input=$('#home-activity');input.value=value;state.activity=value;state.purpose='';history.replaceState({},'',href('/?activity='+encodeURIComponent(value)));document.querySelectorAll('[data-action="keyword"]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.value===value)));input.focus();}
     else if(action==='purpose-keyword')go(href('/purpose?activity='+encodeURIComponent(value)));
     else if(action==='choose-purpose'){state.purpose=value;drafts.facility.use=value;if(state.conditions.facility)state.conditions.facility={...state.conditions.facility,use:value};render();}
-    else if(action==='category'){const params=new URLSearchParams(location.search);params.set('category',value);go(href(path()+'?'+params),true);}
-    else if(action==='reset-search')go(href(path()),true);
-    else if(action==='duration'){const form=el.closest('form');const input=$('[name=start]',form),end=$('[name=end]',form);end.value=addHours(input.value,Number(el.dataset.hours));end.dispatchEvent(new Event('input',{bubbles:true}));}
+    else if(action==='category'){const params=new URLSearchParams(location.search);params.set('category',value);go(href(path()+'?'+params),true,true);}
+    else if(action==='reset-search')go(href(path()),true,true);
+    else if(action==='available-only'){const params=new URLSearchParams(location.search);if(el.checked)params.set('available','1');else params.delete('available');go(href(path()+'?'+params),true,true);}
+    else if(action==='view-selection'){$('#selection')?.focus({preventScroll:true});$('#selection')?.scrollIntoView({block:'start'});}
+    else if(action==='back-to-results'){const results=$('#browse-results')||$('.workspace-content');results.setAttribute('tabindex','-1');results.focus({preventScroll:true});results.scrollIntoView({block:'start'});}
+    else if(action==='duration'){const form=el.closest('form');const input=$('[name=start]',form),end=$('[name=end]',form);if(!input.value){input.focus();return toast('수령 예정 일시를 먼저 입력해주세요.',true);}end.value=addHours(input.value,Number(el.dataset.hours));end.dispatchEvent(new Event('input',{bubbles:true}));}
     else if(action==='select')toggleSelection(id);
     else if(action==='remove'){delete state.selected[id];saveSelection();render();}
     else if(action==='edit-selection')editSelection(id);
@@ -327,6 +395,12 @@ document.addEventListener('click', async event => {
     else if(action==='logout'){await logout();state.user=null;state.records=[];state.selected={};sessionStorage.removeItem(sessionKey);authContinuation=null;if(modal.open)modal.close();await refresh();render();toast('로그아웃했습니다.');}
     else if(action==='request')showRequest(id);
     else if(action==='admin-filter'){state.adminFilter=value;render();}
+    else if(action==='student-filter'){const params=new URLSearchParams(location.search);params.set('status',value);params.delete('request');go(href(path()+'?'+params),true,true);}
+    else if(action==='refresh-records'){
+      el.disabled=true;el.textContent='조회 중…';
+      try {await refresh();render();toast('최신 신청 상태를 확인했습니다.');}
+      finally {if(el.isConnected){el.disabled=false;el.textContent='최신 상태 조회';}}
+    }
     else if(action==='transition')showTransition(number,id,to);
     else if(action==='reject')showReject(number,id);
     else if(action==='inspection')showInspection(number,id,type);
@@ -336,13 +410,18 @@ document.addEventListener('input',event=>{
   const form=event.target.closest('form');if(!form)return;
   if(form.dataset.form==='condition'){
     const kind=form.dataset.kind;Object.assign(drafts[kind],readCondition(form,kind));
-    $('.draft-warning',form).hidden=false;
+    $('.draft-warning',form).hidden=conditionsMatch(drafts[kind],state.conditions[kind],kind);
     if(event.target.name==='people')state.peopleSource.manuallyEdited=true;
   }
   if(form.dataset.form==='home-purpose'){
     state.activity=event.target.value;state.purpose='';history.replaceState({},'',href('/?activity='+encodeURIComponent(state.activity)));
     document.querySelectorAll('[data-action="keyword"]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.value===state.activity)));
   }
+});
+document.addEventListener('change',event=>{
+  if(event.target.id!=='records-sort')return;
+  const params=new URLSearchParams(location.search);params.set('sort',event.target.value);
+  go(href(path()+'?'+params),true,true);
 });
 document.addEventListener('submit',async event=>{
   const form=event.target.closest('form[data-form]');if(!form)return;event.preventDefault();
@@ -354,7 +433,7 @@ document.addEventListener('submit',async event=>{
       if(analysis.intent==='direct')go(href((analysis.equipmentQuery?'/equipment?q=':'/facilities?q=')+encodeURIComponent(analysis.equipmentQuery||analysis.facilityQuery)));
       else { if(activity!==state.activity)state.purpose='';go(href('/purpose?activity='+encodeURIComponent(activity))); }
     } else if(mode==='search'){
-      const params=new URLSearchParams(location.search);params.set('q',String(f.get('q')||'').trim());go(href(path()+'?'+params),true);
+      const params=new URLSearchParams(location.search);params.set('q',String(f.get('q')||'').trim());go(href(path()+'?'+params),true,true);
     } else if(mode==='condition'||mode==='edit-selection'){
       const kind=form.dataset.kind,c=readCondition(form,kind),errors=validateCondition(c,kind);
       if(mode==='edit-selection')errors.push(...check(resource(form.dataset.id),c));
@@ -372,15 +451,16 @@ document.addEventListener('submit',async event=>{
       $('#slot-results').innerHTML=modalContext.slots.length?modalContext.slots.map((c,i)=>`<div class="panel" style="margin-bottom:10px"><p>${esc(scheduleSummary(c,resource(form.dataset.id).kind))}</p>${button('select-slot','이 일정으로 선택',`data-index="${i}"`,'primary small')}</div>`).join(''):empty('가능한 일정이 없습니다.','조회 날짜 또는 이용 조건을 변경해주세요.');
     } else {
       state.busy=true;if(submitter)submitter.disabled=true;
+      if(mode==='request') {form.setAttribute('aria-busy','true');if(submitter)submitter.textContent='신청 접수 중…';}
       if(mode==='auth'){
         const user=await authenticate({name:String(f.get('name')||''),email:String(f.get('email')),password:String(f.get('password'))},form.dataset.signup==='true');
         state.user=user;const savedSelection=await api('/selection');state.selected={...savedSelection.selected,...state.selected};await api('/selection',{method:'POST',body:{selected:state.selected}});await refresh();const pending=authContinuation;authContinuation=null;modal.close();render();toast(`${user.name}님, 로그인했습니다.`);
         if(pending)showRequest(pending);
       } else if(mode==='request'){
         const id=form.dataset.id,r=resource(id),c=state.selected[id];if(!c||!state.user)throw new Error('선택 항목과 로그인 상태를 다시 확인해주세요.');
-        const record={number:'CR-'+crypto.randomUUID().slice(0,8).toUpperCase(),userId:state.user.id,createdAt:new Date().toISOString(),condition:{...c},items:[{...r,condition:{...c},stage:'pending'}]};
-        await commitChange({type:'create',record,actor:{id:state.user.id,role:state.user.role}});
-        delete state.selected[id];saveSelection();modal.close();render();toast('신청이 접수되었습니다. 내 신청 현황에서 승인 결과를 확인하세요.');
+        const record={condition:{...c},items:[{id:r.id,condition:{...c}}]};
+        const result=await commitChange({type:'create',record});
+        delete state.selected[id];saveSelection();render();showReceipt(result);
       } else if(['transition','reject','inspection'].includes(mode)){
         const change={...modalContext};
         if(mode==='reject')change.reason=String(f.get('reason')||'');
@@ -388,12 +468,13 @@ document.addEventListener('submit',async event=>{
           change.memo=String(f.get('memo')||'');change.confirmed=Boolean(f.get('confirmed'));
           change.rows=[...form.querySelectorAll('[data-component]')].map(row=>({componentId:row.dataset.component,quantity:Number($('[name=quantity]',row).value),condition:$('[name=condition]',row).value,note:$('[name=note]',row).value,confirmed:$('[name=confirmed]',row).checked}));
         }
-        await commitChange(change);modal.close();render();toast('처리 결과를 저장했습니다.');
+        const result=await commitChange(change);modal.close();render();toast(result.availabilityRefreshFailed?'처리는 저장되었습니다. 이용 가능 정보는 최신 상태 조회로 다시 확인해주세요.':'처리 결과를 저장했습니다.');
       }
     }
   } catch(error){errorIn(form,error.message||'처리하지 못했습니다. 다시 시도해주세요.');}
-  finally {state.busy=false;if(submitter?.isConnected)submitter.disabled=false;}
+  finally {state.busy=false;if(submitter?.isConnected){submitter.disabled=false;if(mode==='request')submitter.textContent='최종 신청 제출';}if(form.isConnected)form.removeAttribute('aria-busy');}
 });
+modal.addEventListener('cancel',event=>{if(state.busy)event.preventDefault();});
 modal.addEventListener('close',()=>{
   // A successful login may immediately open a new confirmation dialog. The old
   // dialog's queued close event must not clear that new dialog's context.
@@ -402,7 +483,7 @@ modal.addEventListener('close',()=>{
   if(['/admin','/records','/history'].includes(path()))render();
   if(lastFocus?.isConnected)lastFocus.focus();else $('#main').focus({preventScroll:true});
 });
-window.addEventListener('popstate',()=>{if(modal.open)modal.close();syncRoute();render();});
+window.addEventListener('popstate',()=>{if(modal.open)modal.close();syncRoute();render();focusRequestedRecord();});
 let refreshVersion=0;
 async function refresh() {
   const version=++refreshVersion;
@@ -413,9 +494,11 @@ async function refresh() {
   state.user=user;if(savedSelection)state.selected=savedSelection.selected;state.records=snapshot?.records||[];state.equipmentStates=snapshot?.equipmentStates||{};
   setServerCatalog(catalog,reservations);
   for(const id of Object.keys(state.selected))if(!resources.some(r=>r.id===id))delete state.selected[id];
-  if(!state.busy&&!modal.open)render();
+  // Returning to this window must not erase an unfinished search or activity input.
+  const editing = document.activeElement?.matches('input,select,textarea');
+  if(!state.busy&&!modal.open&&!editing)render();
 }
 async function refreshSafely(){try{await refresh();}catch(error){toast(error.message||'서버 연결을 확인해주세요.',true);}}
 window.addEventListener('focus',refreshSafely);
 try {const channel=new BroadcastChannel(CHANNEL_NAME);channel.onmessage=refreshSafely;}catch{}
-try{await refresh();syncRoute();render();}catch(error){header();$('#main').innerHTML='<div class="container records-page"><h1>데이터를 불러오지 못했습니다</h1><p>'+esc(error.message)+'</p><button class="btn primary" onclick="location.reload()">다시 시도</button></div>';}
+try{await refresh();syncRoute();render();focusRequestedRecord();}catch(error){header();$('#main').innerHTML='<div class="container records-page"><h1>데이터를 불러오지 못했습니다</h1><p>'+esc(error.message)+'</p><button class="btn primary" onclick="location.reload()">다시 시도</button></div>';}

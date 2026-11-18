@@ -3,9 +3,11 @@
 import assert from 'node:assert/strict';
 import { resources, analyzeInput, recommendationItems, availability, alternateResources,
   alternateSlots, conditionErrors, purposeSubmissionPeople } from '../src/main/resources/static/js/rental-data.js';
-import { applyRecordChange, reservationBlocks, canStudentTransition, ended, stageLabel } from '../src/main/resources/static/js/rental-records.js';
+import { applyRecordChange, reservationBlocks, canStudentTransition, ended, stageLabel, refreshAfterSave } from '../src/main/resources/static/js/rental-records.js';
 import { returnTotals, equipmentRestrictions } from '../src/main/resources/static/js/equipment-inspection.js';
 import { authenticate } from '../src/main/resources/static/js/auth-service.js';
+import { filterResources, conditionsMatch } from '../src/main/resources/static/js/browse-view.js';
+import { studentRecords, studentGuidance, receiptRecord } from '../src/main/resources/static/js/student-records.js';
 
 export async function runChecks() {
   const results = [];
@@ -42,12 +44,73 @@ export async function runChecks() {
     assert(availability(get('cam01'),null).length);assert(conditionErrors({...condition,end:condition.start}).length);
     assert(conditionErrors({...condition,start:'2000-01-01T14:00',end:'2000-01-01T16:00'}).length);
   });
+  const recordFixture=(number,stage,start,end,owner='demo-user',createdAt='2099-01-01T09:00:00')=>({number,userId:owner,createdAt,condition:{...condition,start,end},items:[{id:'cam01',kind:'장비',name:'카메라',stage}]});
+  const recordFixtures=[
+    recordFixture('FAR','approved','2099-10-20T10:00','2099-10-20T12:00'),
+    recordFixture('RETURN','collected','2099-10-01T10:00','2099-10-17T12:00'),
+    recordFixture('NEAR','pending','2099-10-16T10:00','2099-10-16T12:00','demo-user','2099-01-02T09:00:00'),
+    recordFixture('OTHER','pending','2099-10-15T10:00','2099-10-15T12:00','other-user'),
+    recordFixture('DONE','returned','2099-10-14T10:00','2099-10-14T12:00')
+  ];
+  await test('내 신청은 본인 항목만 표시하고 진행 중·과거 내역을 분리',()=>{
+    assert.deepEqual(studentRecords(recordFixtures,'demo-user').map(r=>r.number),['NEAR','RETURN','FAR']);
+    assert.deepEqual(studentRecords(recordFixtures,'demo-user',{history:true}).map(r=>r.number),['DONE']);
+    assert.equal(recordFixtures.length,5);assert.equal(recordFixtures[0].number,'FAR');
+  });
+  await test('상태 필터·최근 신청순·빈 결과 및 항목별 조건 정렬',()=>{
+    assert.deepEqual(studentRecords(recordFixtures,'demo-user',{status:'approved'}).map(r=>r.number),['FAR']);
+    assert.equal(studentRecords(recordFixtures,'demo-user',{sort:'newest'})[0].number,'NEAR');
+    assert.equal(studentRecords(recordFixtures,'demo-user',{status:'return_held'}).length,0);
+    const mixed={...recordFixtures[0],number:'MIX',items:[{...recordFixtures[0].items[0],condition:{...condition,start:'2099-10-15T09:00'}},{...recordFixtures[0].items[0],stage:'returned'}]};
+    const filtered=studentRecords([...recordFixtures,mixed],'demo-user');
+    assert.equal(filtered[0].number,'MIX');assert.equal(filtered[0].items.length,1);assert.equal(mixed.items.length,2);
+  });
+  await test('장비 반납 지연·시설 종료·승인 후 취소 안내를 구분',()=>{
+    const item={kind:'장비',stage:'collected'},now=new Date('2099-10-15T17:00').getTime();
+    assert(studentGuidance(item,condition,now).warning);
+    assert(!studentGuidance(item,condition,new Date('2099-10-15T15:00').getTime()).warning);
+    assert(studentGuidance({...item,kind:'시설'},condition,now).description.includes('관리자가 처리'));
+    assert(studentGuidance({...item,stage:'approved'},condition,now).description.includes('관리자에게 문의'));
+    assert(!studentGuidance({...item,stage:'returned'},condition,now).warning);
+  });
+  await test('완료 화면은 서버가 지정한 본인 접수 번호만 사용',()=>{
+    const saved={status:'saved',createdNumber:'NEAR',records:recordFixtures};
+    assert.equal(receiptRecord(saved,'demo-user').number,'NEAR');
+    assert.equal(receiptRecord({...saved,createdNumber:'OTHER'},'demo-user'),null);
+    assert.equal(receiptRecord({...saved,status:'failed'},'demo-user'),null);
+    assert.equal(receiptRecord({...saved,createdNumber:undefined},'demo-user'),null);
+  });
+  await test('저장 후 조회 실패는 접수 성공을 유지하고 실패한 저장은 후속 조회하지 않음',async()=>{
+    const saved={status:'saved',createdNumber:'NEAR',records:recordFixtures};
+    const result=await refreshAfterSave(saved,async()=>{throw new Error('조회 연결 끊김');});
+    assert.equal(result.status,'saved');assert.equal(result.availabilityRefreshFailed,true);
+    assert.equal(receiptRecord(result,'demo-user').number,'NEAR');
+    let called=false;await refreshAfterSave({status:'conflict'},async()=>{called=true;});assert.equal(called,false);
+  });
   await test('시설 인원·허용 용도·운영 시간 제한',()=>{
     assert(availability(get('room01'),condition).some(e=>e.includes('수용')));
     assert(availability(get('room02'),{...condition,use:'인터뷰 촬영'}).some(e=>e.includes('허용')));
     assert(availability(get('room02'),{...condition,end:'2099-10-15T21:00'}).some(e=>e.includes('운영')));
   });
   await test('점검 중 장비는 선택 불가',()=>assert(availability(get('mic03'),condition).some(e=>e.includes('점검'))));
+  await test('검색어·분류·이용 가능 필터를 함께 적용하고 초기화',()=>{
+    const pool=resources.filter(r=>r.kind==='장비');
+    const isAvailable=r=>availability(r,condition).length===0;
+    const matches=filterResources(pool,{query:'  '+get('cam01').model.toUpperCase()+'  ',category:get('cam01').category,availableOnly:true},isAvailable);
+    assert(matches.some(r=>r.id==='cam01'));
+    assert(!filterResources(pool,{availableOnly:true},isAvailable).some(r=>r.id==='mic03'));
+    assert.equal(filterResources(pool,{query:'없는 장비'},isAvailable).length,0);
+    assert.equal(filterResources(pool,{},isAvailable).length,pool.length);
+    assert(!filterResources(pool,{category:'없는 분류'},isAvailable).length);
+  });
+  await test('조회 조건 미적용·변경·원복을 구분하고 장비에서는 시설 인원을 무시',()=>{
+    assert(!conditionsMatch(condition,null,'facility'));
+    assert(conditionsMatch({...condition},condition,'facility'));
+    assert(!conditionsMatch({...condition,end:'2099-10-15T17:00'},condition,'equipment'));
+    assert(!conditionsMatch({...condition,people:8},condition,'facility'));
+    assert(!conditionsMatch({...condition,use:'발표 연습'},condition,'facility'));
+    assert(conditionsMatch({...condition,people:8},condition,'equipment'));
+  });
   await test('대체 장비와 다른 일정이 기존 조건을 보존',()=>{
     assert.deepEqual(alternateResources(get('cam01'),condition).map(r=>r.id),['cam02']);
     const slots=alternateSlots(get('cam01'),condition,'2099-10-16','2099-10-17');assert(slots.length);

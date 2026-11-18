@@ -274,3 +274,9 @@ export async function persistRecords(change, canWrite = ()=>true, currentActor =
  try { const channel=new BroadcastChannel(CHANNEL_NAME);channel.postMessage('changed');channel.close(); } catch {}
  return result;
 }
+export async function refreshAfterSave(result, refreshAvailability) {
+ if(result.status !== 'saved') return result;
+ try { await refreshAvailability(); }
+ catch { result.availabilityRefreshFailed = true; }
+ return result;
+}

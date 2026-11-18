@@ -61,7 +61,10 @@ class OracleWorkflowIT {
         assertEquals(0,getJson("/api/selection",other).path("selected").size());
         String hash=db.queryForObject("SELECT PASSWORD FROM APP_USER WHERE USER_ID=?",String.class,Long.parseLong(user.path("id").asText()));
         assertNotEquals(password,hash);assertTrue(Passwords.matches(password,hash));assertFalse(Passwords.matches("incorrect",hash));
-        JsonNode created=create(c,"E1","2099-10-01",200).path("records").get(0);
+        JsonNode receipt=create(c,"E1","2099-10-01",200);
+        JsonNode created=receipt.path("records").get(0);
+        assertEquals(created.path("number").asText(),receipt.path("createdNumber").asText());
+        assertNotEquals("client-number",receipt.path("createdNumber").asText());
         assertTrue(created.path("number").asText().startsWith("CR-"));assertNotEquals("forged",created.path("items").get(0).path("name").asText());
         assertEquals(user.path("id").asText(),created.path("userId").asText());
         assertEquals(0,getJson("/api/requests",other).path("records").size());

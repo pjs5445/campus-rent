@@ -12,7 +12,7 @@
 <body>
   <a class="skip-link" href="#main">본문으로 바로가기</a>
   <header class="site-header"><div class="header-inner" id="header"></div></header>
-  <main id="main" tabindex="-1"></main>
+  <main id="main" tabindex="-1"><div class="container loading-state" role="status"><span class="loading-dot" aria-hidden="true"></span><h1>시설·장비 정보를 불러오고 있어요</h1><p>이용 가능한 자원을 확인하고 있습니다.</p></div></main>
   <footer class="site-footer"><div class="container">
     <a class="brand footer-brand" href="/" data-route>Campus<span>Rent</span></a>
     <p>New-Era · 교내 시설·장비 대여 및 관리 시스템</p>
@@ -20,6 +20,6 @@
   </div></footer>
   <dialog id="modal" aria-labelledby="modal-title"></dialog>
   <div id="toast" role="status" aria-live="polite" class="toast" hidden></div>
-  <noscript><p class="notice">화면 미리보기를 사용하려면 브라우저의 JavaScript를 활성화해주세요.</p></noscript>
+  <noscript><style>.loading-state{display:none}</style><p class="notice">시설·장비를 조회하고 신청하려면 브라우저의 JavaScript를 활성화해주세요.</p></noscript>
 </body>
 </html>

@@ -139,7 +139,12 @@ public class RentalService {
     @Transactional
     public Map<String,Object> change(JsonNode input,Map<String,Object> user) {
         String type=text(input,"type",30);
-        if(type.equals("create")) { create(input.path("record"),user); return state(user); }
+        if(type.equals("create")) {
+            String number=create(input.path("record"),user);
+            Map<String,Object> result=state(user);
+            result.put("createdNumber",number);
+            return result;
+        }
         String number=text(input,"number",30),key=text(input,"itemId",20);
         lockResource(key);
         String field=key.startsWith("E")?"EQUIPMENT_ID":"FACILITY_ID";
@@ -152,13 +157,14 @@ public class RentalService {
         else inspect(item,key,type,input,user);
         return state(user);
     }
-    private void create(JsonNode record,Map<String,Object> user) {
+    private String create(JsonNode record,Map<String,Object> user) {
         require(!admin(user),"학생 계정으로 신청해주세요.");
         JsonNode items=record.path("items");require(items.isArray()&&items.size()>0&&items.size()<=20,"신청 항목을 확인해주세요.");
         Set<String> keys=new TreeSet<>();for(JsonNode item:items) require(keys.add(text(item,"id",20)),"동일 자원은 한 번만 신청할 수 있습니다.");
         keys.forEach(this::lockResource);
         long request=next("RENT_REQUEST");Timestamp time=now();
-        db.update("INSERT INTO RENT_REQUEST VALUES(?,?,?,?)",request,"CR-"+String.format("%010d",request),userId(user),time);
+        String number="CR-"+String.format("%010d",request);
+        db.update("INSERT INTO RENT_REQUEST VALUES(?,?,?,?)",request,number,userId(user),time);
         int order=0;
         for(JsonNode item:items) {
             String key=text(item,"id",20);Map<String,Object> c=parseCondition(item.has("condition")?item.get("condition"):record.path("condition"));available(key,c,null);
@@ -166,6 +172,7 @@ public class RentalService {
             db.update("INSERT INTO REQUEST_ITEM VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",id,request,++order,key.substring(0,1),key.startsWith("E")?CatalogService.number(key):null,key.startsWith("F")?CatalogService.number(key):null,c.get("USE_START_AT"),c.get("USE_END_AT"),c.get("PEOPLE_COUNT"),c.get("PURPOSE_ID"),"direct",null,"pending",0,time);
             log(id,null,"pending",userId(user),null,time);
         }
+        return number;
     }
     private void transition(Map<String,Object> item,String key,String to,String reason,Map<String,Object> user) {
         String from=(String)item.get("STATUS_CODE");boolean equipment=key.startsWith("E");
